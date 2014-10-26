@@ -1,0 +1,308 @@
+Effects of storm events - analysis of human casualties and material damage
+========================================================
+
+# Introduction
+
+Storms and other severe weather events can cause both public health and economic problems for communities and municipalities. Many severe events can result in fatalities, injuries, and property damage, and preventing such outcomes to the extent possible is a key concern.
+
+This project involves exploring the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database. This database tracks characteristics of major storms and weather events in the United States, including when and where they occur, as well as estimates of any fatalities, injuries, and property damage.
+
+# Synopsis
+
+The following analysis will focus on answering 2 main questions:
+
+1. Across the United States, which types of events (as indicated in the `EVTYPE` variable) are most harmful with respect to population health?
+
+We will try to answer this question from 2 perspectives: human fatalities and human injuries as they're revealed by our data set. Those events for which we don't have any reported fatality nor injury are excluded from the analysis. The rest of them will be aggregated and grouped by each event type (as found in the initial data set), before they will be treated and reduced [the 48 event types currently reported by NOAA](http://www.ncdc.noaa.gov/stormevents/pd01016005curr.pdf).
+
+2. Across the United States, which types of events have the greatest economic consequences?
+
+This question will also be answered from 2 perspectives: crop damage and property damage as they are revealed by our data set. Those events which for which we don't have any reported crop or porperty damage are excluded from the analysis. The rest of them will be aggregated and grouped by each event type (as found in the initial data set), before they will be treated and reduced [the 48 event types currently reported by NOAA](http://www.ncdc.noaa.gov/stormevents/pd01016005curr.pdf).
+
+Finally, plots are generated for each of the 2 questions:
+- plots revealing the top 10 events causing most fatalities and injuries, respectively
+- plots revealing the top 10 events causing most crop and property damage, respectively
+
+
+# Data Processing
+
+## Required libraries
+
+The following libraries are needed to support the analysis:
+
+```{r}
+library(plyr)
+library(reshape2)
+library(ggplot2)
+```
+
+## Reading the data
+
+First, a connection is established with the zip archive (which should reside in the working directory) of the storm data set and the data is read in the `storm.data` data frame.
+
+```{r cahce = TRUE}
+conn = bzfile("repdata_data_StormData.csv.bz2", "r")
+storm.data.raw = read.csv(conn)
+```
+
+Let us take a look at all the columns in our data set. We will be interested in only a few of them, and since our data set is quite large we can already subset those that are interesting for our analys:
+
+```{r}
+colnames(storm.data.raw)
+sel.cols = c("EVTYPE", "FATALITIES", "INJURIES", "INJURIES", "PROPDMG", "PROPDMGEXP", "CROPDMG", "CROPDMGEXP")
+storm.data = storm.data.raw[sel.cols]
+```
+
+## Event type mapping
+
+Upon analysis of the `EVTYPE` column we notice there is a lot of un-tidy data in it (typos) and that some of the factors generated (900+) refer to a smaller subset of events. We have decided to map all the events in the `EVTYPE` column to one of [the 48 event types currently reported by NOAA](http://www.ncdc.noaa.gov/stormevents/pd01016005curr.pdf). Considering this document, we create the following data frame of reference event groups.
+
+```{r}
+evt.groups = toupper(c("Astronomical Low Tide", "Avalanche", "Blizzard", "Coastal Flood", "Cold Wind Chill", "Debris Flow", "Dense Fog", "Dense Smoke", "Drought", "Dust Devil", "Dust Storm", "Excessive Heat", "Extreme Cold Wind Chill", "Flash Flood", "Flood", "Frost Freeze", "Funnel Cloud", "Freezing Fog", "Hail", "Heat", "Heavy Rain", "Heavy Snow", "High Surf", "High Wind", "Hurricane", "Ice Storm", "Lake-Effect Snow", "Lakeshore Flood", "Lightning", "Marine Hail", "Marine High Wind", "Marine Strong Wind", "Marine Thunderstorm Wind", "Rip Current", "Seiche", "Sleet", "Storm Surg Tide", "Strong Wind", "Thunderstorm Wind", "Tornado Typhoon", "Tropical Depression", "Tropical Storm", "Tsunami", "Volcanic Ash", "Waterspout", "Wildfire", "Winter Storm", "Winter Weather" ))
+```
+
+Additionally, we define a variation of the `agrep` function, to perform approximate matches. More specifically, this function will compare the pattern `x` to a given string `y` using the Levensthein distance (max set at 0.3 - value determined empirically). If no result is yielded an NA value is returned, otherwise, the first approximate match is considered.
+
+```{r}
+my.agrep = function(x, y) { t = agrep(x, y, value = TRUE, fixed = FALSE, max.distance = 0.3); ifelse(length(t) == 0, NA, t)}
+```
+
+While this approach is far from perfect, it serves as a good method for cleaning a good part of the `EVTYPE` column. In a real analysis, we would improve this method and couple it with hardcoded manipulations for those events which are difficult to correct automatically.
+
+## Mapping the exponential magnitude of damages
+
+Our data set is using a mapping system between a set of symbols and the powers of 10 by which a damage value should be multiplied. Since the current documentation isn't clear about all of them, we are using the following convention:
+- h, H: 10^2
+- k, K: 10^3
+- m, M: 10^6
+- b, B: 10^9
+- other: 10^0 (we believe that this assumption is not harming our analysis, since the proportion of this kind of symbols in the data is very small)
+
+Considering this, we create a data frame which maps the given symbols to their respective magnitude (power of 10).
+
+```{r}
+sym = c("-", "?", "+", "0", "1", "2", "3", "4", "5", "6", "7", "8", "b", "B", "h", "H", "k", "K", "m", "M")
+mag = c(rep(0, 12), 9, 9, 2, 2, 3, 3, 6, 6)
+exp.map = data.frame(cbind(sym, mag))
+exp.map$mag = as.numeric(exp.map$mag)
+```
+
+## Fatalities analysis
+
+This section explains the data processing w.r.t. the fatalities analysis.
+
+First, those fields with zero-fatalities are filtered out. The remaining are summed up and grouped by event type. Grouping them at this stage insures a smaller overhead for the matching operation to the 48 event categories.
+
+```{r, results='hide'}
+fatalities = storm.data[storm.data$FATALITIES > 0,]
+fatalities = ddply(fatalities, .(EVTYPE), summarize, CNT = sum(FATALITIES))
+```
+
+Next, the `EVTYPE` field is cleaned of all special charachters, leading and trailing spaces. Additionally, multiple spaces are reduced to single spaces. Finally, the "TSTM" string substituted by the "THUNDERSTORM" string.
+
+```{r}
+fatalities$EVTYPE = toupper(fatalities$EVTYPE)
+fatalities$EVTYPE = gsub("[\\\\/\\(\\)\\.,&]", " ", fatalities$EVTYPE)
+fatalities$EVTYPE = gsub("\\s{2,}", " ", fatalities$EVTYPE)
+fatalities$EVTYPE = gsub("^\\s+|\\s+$", "", fatalities$EVTYPE)
+fatalities$EVTYPE = gsub("TSTM", "THUNDERSTORM", fatalities$EVTYPE)
+```
+
+At this stage, function `my.agrep` introduced before is used to determine, for each type of event its closest approximate match to one of the 48 reference event group (see *Synopsis*). Note that the results may not be as accurate as we would want. This was largely just a proof of concept of how such a functionality might be implemented.
+
+Finally, the `fatalities.stats` variable is generated, summing up once again the fatalities tally and grouping it according to the new event groups.
+
+```{r}
+fatalities.groups = melt(sapply(fatalities$EVTYPE, my.agrep, y = evt.groups))
+fatalities$GRP = fatalities.groups[,1]
+fatalities.cln = fatalities[complete.cases(fatalities),]
+fatalities.stats = ddply(fatalities.cln, .(GRP), summarize, CNT = sum(CNT))
+```
+
+We filter the top 10 events. These are the events causing most of the fatalities, according to our analysis.
+
+```{r results='hide'}
+top.fatalities = head(fatalities.stats[order(fatalities.stats$CNT, decreasing = TRUE),], 10)
+sum.fat = sum(top.fatalities$CNT)
+pc.fat = sum(top.fatalities$CNT) / sum(fatalities$CNT)
+```
+
+Finally, we plot the fatalities plot.
+```{r}
+fatalities.plot = ggplot(top.fatalities, aes(x = GRP, y = CNT, fill = CNT)) + geom_bar(stat = "identity") + labs(title = "Fatalities Causing Events (Top 10 - U.S.)", x = "Event Type", y = "Fatalities") + scale_y_discrete(breaks = seq(from = 0, to = 6000, by = 500)) + theme(axis.text.x=element_text(angle = 45, hjust = 1))
+```
+
+
+## Injuries analysis
+
+This section explains the data processing w.r.t. the injuries analysis.
+
+First, those fields with zero-injuries are filtered out. The remaining are summed up and grouped by event type. Grouping them at this stage insures a smaller overhead for the matching operation to the 48 event categories.
+
+```{r}
+injuries = storm.data[storm.data$INJURIES > 0,]
+injuries = ddply(injuries, .(EVTYPE), summarize, CNT = sum(INJURIES))
+```
+
+Next, the `EVTYPE` field is cleaned of all special charachters, leading and trailing spaces. Additionally, multiple spaces are reduced to single spaces. Finally, the "TSTM" string substituted by the "THUNDERSTORM" string.
+
+```{r}
+injuries$EVTYPE = toupper(injuries$EVTYPE)
+injuries$EVTYPE = gsub("[\\\\/\\(\\)\\.,&]", " ", injuries$EVTYPE)
+injuries$EVTYPE = gsub("\\s{2,}", " ", injuries$EVTYPE)
+injuries$EVTYPE = gsub("^\\s+|\\s+$", "", injuries$EVTYPE)
+injuries$EVTYPE = gsub("TSTM", "THUNDERSTORM", injuries$EVTYPE)
+```
+
+At this stage, function `my.agrep` introduced before is used to determine, for each type of event its closest approximate match to one of the 48 reference event group (see *Synopsis*). Note that the results may not be as accurate as we would want. This was largely just a proof of concept of how such a functionality might be implemented.
+
+Finally, the `injuries.stats` variable is generated, summing up once again the injuries tally and grouping it according to the new event groups.
+
+```{r}
+injuries.groups = melt(sapply(injuries$EVTYPE, my.agrep, y = evt.groups))
+injuries$GRP = injuries.groups[,1]
+injuries.cln = injuries[complete.cases(injuries),]
+injuries.stats = ddply(injuries.cln, .(GRP), summarize, CNT = sum(CNT))
+```
+
+We filter the top 10 events. These are the events causing most of the injuries, according to our analysis.
+```{r results='hide'}
+top.injuries = head(injuries.stats[order(injuries.stats$CNT, decreasing = TRUE),], 10)
+sum.inj = sum(top.injuries$CNT)
+pc.inj = sum(top.injuries$CNT) / sum(injuries.stats$CNT)
+```
+
+Finally, we plot the injuries plot.
+```{r}
+injuries.plot = ggplot(top.injuries, aes(x = GRP, y = CNT, fill = CNT)) + geom_bar(stat = "identity") + labs(title = "Injury Causing Events (Top 10 - U.S.)", x = "Event Type", y = "Injuries") + scale_y_discrete(breaks = seq(from = 0, to = 92000, by = 5000)) + theme(axis.text.x=element_text(angle = 45, hjust = 1))
+```
+
+
+## Crop damage analysis
+
+This section explains the data processing w.r.t. the crop damage analysis.
+
+First, those fields with zero-damage are filtered out. The remaining are merged with the symbol frame, thus attaching a column with the corresponding magnitude for each damage value. The values are then summed up (power magnitude taken into account) and grouped by event type. Grouping them at this stage insures a smaller overhead for the matching operation to the 48 event categories.
+
+```{r}
+crop.dmg = storm.data[storm.data$CROPDMG > 0,]
+crop.dmg = merge(crop.dmg, exp.map, by.x = "CROPDMGEXP", by.y = "sym")
+crop.dmg = ddply(crop.dmg, .(EVTYPE), summarize, CNT = sum(CROPDMG * (10 ^ mag)))
+```
+
+Next, the same processing as before is performed w.r.t. to the content of the `EVTYPE` (see previous sub-sections).
+
+```{r}
+crop.dmg$EVTYPE = toupper(crop.dmg$EVTYPE)
+crop.dmg$EVTYPE = gsub("[\\\\/\\(\\)\\.,&]", " ", crop.dmg$EVTYPE)
+crop.dmg$EVTYPE = gsub("\\s{2,}", " ", crop.dmg$EVTYPE)
+crop.dmg$EVTYPE = gsub("^\\s+|\\s+$", "", crop.dmg$EVTYPE)
+crop.dmg$EVTYPE = gsub("TSTM", "THUNDERSTORM", crop.dmg$EVTYPE)
+```
+
+At this stage, function `my.agrep` introduced before is used to determine, for each type of event its closest approximate match to one of the 48 reference event group (see *Synopsis*). Note that the results may not be as accurate as we would want. This was largely just a proof of concept of how such a functionality might be implemented.
+
+Finally, the `crop.dmg.stats` variable is generated, summing up once again the crop damage tally and grouping it according to the new event groups.
+
+```{r}
+crop.dmg.groups = melt(sapply(crop.dmg$EVTYPE, my.agrep, y = evt.groups))
+crop.dmg$GRP = crop.dmg.groups[,1]
+crop.dmg.cln = crop.dmg[complete.cases(crop.dmg),]
+crop.dmg.stats = ddply(crop.dmg.cln, .(GRP), summarize, CNT = sum(CNT))
+```
+
+We filter the top 10 events. These are the events causing most of the fatalities, according to our analysis.
+Procentually, with respect to the total number of all fatalities, they account for the following proportion:
+
+```{r results='hide'}
+top.crop.dmg = head(crop.dmg.stats[order(crop.dmg.stats$CNT, decreasing = TRUE),], 10)
+sum.crop = sum(top.crop.dmg$CNT)
+pc.crop = sum(top.crop.dmg$CNT) / sum(crop.dmg.stats$CNT)
+```
+
+Finally, we plot the fatalities plot.
+
+```{r}
+crop.dmg.plot = ggplot(top.crop.dmg, aes(x = GRP, y = CNT, fill = CNT)) + geom_bar(stat = "identity") + labs(title = "Crop Damage (Top 10 - U.S.)", x = "Event Type", y = "Value [USD]") + scale_y_discrete(breaks = seq(from = 0, to = 10^9, by = 10^6)) + theme(axis.text.x=element_text(angle = 45, hjust = 1))
+```
+
+## Property damage analysis
+
+This section explains the data processing w.r.t. the property damage analysis.
+
+First, those fields with zero-damage are filtered out. The remaining are merged with the symbol frame, thus attaching a column with the corresponding magnitude for each damage value. The values are then summed up (power magnitude taken into account) and grouped by event type. Grouping them at this stage insures a smaller overhead for the matching operation to the 48 event categories.
+
+```{r}
+prop.dmg = storm.data[storm.data$PROPDMG > 0,]
+prop.dmg = merge(prop.dmg, exp.map, by.x = "PROPDMGEXP", by.y = "sym")
+prop.dmg = ddply(prop.dmg, .(EVTYPE), summarize, CNT = sum(PROPDMG * (10 ^ mag)))
+```
+
+Next, the same processing as before is performed w.r.t. to the content of the `EVTYPE` (see previous sub-sections).
+
+```{r}
+prop.dmg$EVTYPE = toupper(prop.dmg$EVTYPE)
+prop.dmg$EVTYPE = gsub("[\\\\/\\(\\)\\.,&]", " ", prop.dmg$EVTYPE)
+prop.dmg$EVTYPE = gsub("\\s{2,}", " ", prop.dmg$EVTYPE)
+prop.dmg$EVTYPE = gsub("^\\s+|\\s+$", "", prop.dmg$EVTYPE)
+prop.dmg$EVTYPE = gsub("TSTM", "THUNDERSTORM", prop.dmg$EVTYPE)
+```
+
+At this stage, function `my.agrep` introduced before is used to determine, for each type of event its closest approximate match to one of the 48 reference event group (see *Synopsis*). Note that the results may not be as accurate as we would want. This was largely just a proof of concept of how such a functionality might be implemented.
+
+Finally, the `crop.dmg.stats` variable is generated, summing up once again the crop damage tally and grouping it according to the new event groups.
+
+```{r}
+prop.dmg.groups = melt(sapply(prop.dmg$EVTYPE, my.agrep, y = evt.groups))
+prop.dmg$GRP = prop.dmg.groups[,1]
+prop.dmg.cln = prop.dmg[complete.cases(prop.dmg),]
+prop.dmg.stats = ddply(prop.dmg.cln, .(GRP), summarize, CNT = sum(CNT))
+```
+
+We filter the top 10 events. These are the events causing most of the fatalities, according to our analysis.
+Procentually, with respect to the total number of all fatalities, they account for the following proportion:
+
+```{r results='hide'}
+top.prop.dmg = head(prop.dmg.stats[order(prop.dmg.stats$CNT, decreasing = TRUE),], 10)
+sum.prop = sum(top.prop.dmg$CNT)
+pc.prop = sum(top.prop.dmg$CNT) / sum(prop.dmg.stats$CNT)
+```
+
+Finally, we plot the fatalities plot.
+
+```{r}
+prop.dmg.plot = ggplot(top.prop.dmg, aes(x = GRP, y = CNT, fill = CNT)) + geom_bar(stat = "identity") + labs(title = "Property Damage (Top 10 - U.S.)", x = "Event Type", y = "Value [USD]") + scale_y_discrete(breaks = seq(from = 0, to = 10^9, by = 10^6)) + theme(axis.text.x=element_text(angle = 45, hjust = 1))
+```
+
+
+# Results
+
+## Human fatalities and injuries
+
+The top 10 events causing most fatalities and injuries, respectively can be seen below:
+
+```{r fig.width = 20, fig.height=30, cache=TRUE}
+grid.arrange(fatalities.plot, injuries.plot)
+```
+
+The top 10 fatality-causing events add up to `r sum.fat` victims, accounting for `r pc.fat` of the total number of fatalities.
+
+Similarly, the top 10 injury-causing events add up to `r sum.inj` casualties, accounting for `r pc.inj` of the total number of casualties.
+
+## Crop damage
+
+The top 10 events causing most crop damage can be seen below:
+```{r fig.width = 20, fig.height=30, cache=TRUE}
+crop.dmg.plot
+```
+
+The top 10 crop-damaging events add up to `r sum.crop` USD, accounting for `r pc.crop` of the total number of fatalities.
+
+## Property damage
+
+The top 10 events causing most property damage can be seen below:
+```{r fig.width = 20, fig.height=30, cache=TRUE}
+prop.dmg.plot
+```
+
+The top 10 property-damaging events add up to `r sum.prop` USD, accounting for `r pc.prop` of the total number of fatalities.
